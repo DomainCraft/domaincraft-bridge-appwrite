@@ -1,0 +1,117 @@
+# {{ .Project.Name }} — Appwrite
+
+{{ .Project.Description }}
+
+Генерируется мостом `domaincraft-bridge-appwrite`. Мост владеет только **схемой**;
+миграции схемы выполняет сам CLI Appwrite (v26 — полноценный движок миграций).
+
+## Что в выходе
+
+| Файл | Содержимое |
+|---|---|
+| `appwrite.config.json` | вся схема одним файлом: БД `main`, таблицы, колонки, индексы, пермишены, команды ролей, `settings` |
+| `helpers/permissions.js` | row-пермишены для `@Owner`-сущностей (только если есть `@Owner`) |
+| `scripts/seed.js` | seed-строки через `appwrite tablesdb create-row` (только если есть seed) |
+
+## Деплой
+
+```bash
+# 1. Привяжите конфиг к проекту (одно из):
+appwrite init project            # интерактивно: заполнит projectId/projectName/endpoint
+# или вручную отредактируйте projectId / projectName / endpoint в appwrite.config.json
+# (endpoint по умолчанию — https://cloud.appwrite.io/v1; для self-hosted укажите свой)
+# ВНИМАНИЕ: projectName в конфиге = имя домена ({{ .Project.Name }}) — push может
+# переименовать проект. Создайте проект с этим именем или измените projectName.
+
+# 2. Примените схему. CLI покажет план изменений и спросит подтверждения:
+appwrite push all
+
+# CI / без промптов (нужен API-ключ или активная сессия):
+appwrite client --key $APPWRITE_API_KEY
+appwrite push all --force
+```
+
+`domaincraft generate --migrate` сам запускает `appwrite push all --force`.
+
+**Полный источник истины.** Push считает конфиг полным списком БД и таблиц проекта:
+любая БД проекта, которой нет в конфиге, будет **предложена к удалению** (banner
+«Database deletion will also delete all related tables»). Не пушите в проект, где есть
+БД вне доменной модели. Квирк CLI: `enabled` таблицы распознаётся как различие, но не
+применяется.
+
+## Runtime (одна страница)
+
+{{- if .Project.HasAuth }}
+{{- $defaultRole := "" }}
+{{- range $e := .Project.Entities }}{{ if eq $e.Name $.Project.Auth.Entity }}{{ range $f := $e.Fields }}{{ if eq (lower $f.Name) "role" }}{{ if $f.DefaultValue }}{{ $defaultRole = $f.DefaultValue }}{{ end }}{{ end }}{{ end }}{{ end }}{{ end }}
+{{- if not $defaultRole }}{{ range .Project.Auth.Roles }}{{ if not $defaultRole }}{{ $defaultRole = . }}{{ end }}{{ end }}{{ end }}
+
+- **Auth — нативный Appwrite** (email-password). Сущность `{{ .Project.Auth.Entity }}`
+  таблицей НЕ создаётся; связи на неё — колонки `varchar(36)` с user ID.
+{{- if $defaultRole }}
+- **Регистрация + назначение роли:** после создания пользователя добавьте его в команду
+  дефолтной роли (берётся из поля `role` сущности `{{ .Project.Auth.Entity }}`):
+  `teams.createMembership("role-{{ lower $defaultRole }}", [], email)`.
+  Дефолтная роль в этой модели: **{{ $defaultRole }}** (`role-{{ lower $defaultRole }}`).
+{{- end }}
+- **Создание строки у `@Owner`-сущности:** импортируйте
+  `helpers/permissions.js` → `rowPermissions("<таблица>", userId)` и передайте
+  результат в `createRow(..., permissions)`. Appwrite сам фильтрует `list` по
+  row-пермишенам — фильтровать в приложении не нужно.
+- **Seed:** `SEED_USER_ID=<userId> node scripts/seed.js` — строки создаются от имени
+  пользователя (row-пермишены `@Owner` подставляются по этому ID).
+{{- if gt (len .Project.Auth.Roles) 0 }}
+- **Первый админ** (`auth.setup` не переносится): создайте пользователя в Console,
+  добавьте в команду `role-{{ index .Project.Auth.Roles 0 | lower }}` (или через API).
+{{- else }}
+- **Роли не объявлены** (`auth.roles` пуст) — команды ролей не создаются; доступ
+  только через `*` и `@Owner`-токены.
+{{- end }}
+{{- else }}
+- **Auth выключен** — все таблицы публичные (`any`); команды ролей не создаются.
+{{- end }}
+
+## Renames (миграции — это CLI, не скрипты моста)
+
+- **Поле** (`old_name` у поля): мост эмитит `previousKey` — CLI переименует колонку
+  **in-place**, данные сохраняются.
+  ⚠️ На Appwrite ≤1.9.5 переименование/обновление колонки на таблице **с relationship-колонками**
+  падает («There is already an index with the same attributes and orders», баг пересборки
+  индексов). Обход: пересоздать таблицу (create-путь) или временно убрать связь → push → вернуть.
+- **Сущность** (`old_name` у сущности): у Appwrite нет переименования таблиц — push
+  применит delete+create схемы с подтверждением, **строки перенесите вручную**
+  (создать таблицу из обновлённого конфига → скопировать данные → удалить старую).
+- Изменение `type`/`array`/`relatedTable` колонки → recreate с баннером о потере данных
+  («may cause loss of data») — проверяйте план перед подтверждением.
+- **Версия сервера:** используйте `appwrite/appwrite:1.9.5` — образы 1.9.6/`latest` сломаны
+  (Go-бинари внутри 0 байт, `exec format error`).
+
+## Ограничения (проверенные)
+
+| Конструкция DomainCraft | В Appwrite |
+|---|---|
+| `decimal` | `double` (потеря точности; в конфиге `double`, на проводе `/float`) |
+| `json` / `jsonb` | `text` (JSON-строка) |
+| `date` | `datetime` ISO 8601 (появляется время) |
+| `default` на required-поле | `required:false` + default (Appwrite запрещает default на required-колонке) — БД заполняет, колонка становится nullable |
+| фичи audit/soft_delete/optimistic_lock | поля-колонки `required:false` — сервер не заполняет их сам, пишет приложение |
+| индексы по relationship-колонкам | выкидываются из индекса (TablesDB: «Cannot create an index for a relationship attribute»); пустой индекс не создаётся |
+| `default: now()` / `uuid()` | только статические default |
+| `regex` / `hidden` / `readonly` | валидация/семантика в приложении |
+| `gt` / `lt` (строгие) | аппроксимация инклюзивными `min`/`max` |
+| `optimistic_lock` / `audit_log` / `soft_delete` | только поля-колонки (`version`, `createdBy`, `deletedAt`, …), поведения нет |
+| `event_sourced` / `cacheable` / `multi_tenancy` / `infrastructure` | не применимы, игнорируются |
+| self-relation | `varchar(36)` parent ID без FK (Appwrite не поддерживает self-relationships, issue #9471) |
+| `on_delete: no_action` | `restrict` |
+| роли с одинаковым lowercase-слагом | не поддерживаются (команда `role-<lowercase>` — одна) |
+| тип индекса (btree/gin/…) | `key` (Appwrite: только key/unique/fulltext) |
+
+Правило: реализуется только то, что выражается в `appwrite.config.json`; всё остальное —
+поля без поведения или логика приложения.
+
+## Верификация
+
+```bash
+appwrite pull tables    # обратное направление — сверка схемы (порядок ключей у CLI другой)
+appwrite generate -l typescript   # клиентские типы из живого проекта
+```

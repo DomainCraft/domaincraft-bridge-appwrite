@@ -1,0 +1,129 @@
+# DomainCraft Appwrite bridge — Certification (TCK)
+#
+# NOT a copy of the generic DomainCraft certification template
+# (DomainCraft/compliance-suite/certification.yml): that template certifies
+# bridges that generate a *runnable app* (docker compose up the generated app,
+# then k6 against its HTTP contract). This bridge generates an
+# `appwrite.config.json` that is *pushed* to Appwrite itself — so the
+# certification runs against a live Appwrite and verifies the pushed *state*
+# (tables, rowSecurity, permissions, teams, settings, seed) with the
+# hand-written oracle at tck/verify.js.
+#
+# The instance is Appwrite Cloud — this repo hosts no Appwrite infrastructure.
+# The oracle authenticates with ONE project API key from repository secrets
+# (the project `tck` exists already; the key is created once in the console
+# with all scopes). Both modes share this one project: `push all` deletes
+# tables absent from the config itself, and the oracle cleans stale role
+# teams (the CLI's teams push is create/update-only — it never deletes).
+# Fork PRs cannot access secrets, so they are skipped (main pushes and
+# same-repo PRs certify).
+#
+# The kitchen-sink domain stays shared: it is checked out from the core repo,
+# and the DomainCraft CLI is installed from the matching release.
+#
+# The oracle is hand-written against the mapping contract (plan §5–§6), never
+# generated from the bridge templates — a bridge bug cannot reproduce itself
+# in the test.
+---
+name: Bridge Certification (TCK)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  # Core repo ref to checkout (branch or tag). Locks the kitchen-sink model
+  # and the CLI version used for generation.
+  CORE_VERSION: main
+  # Appwrite Cloud endpoint (override for a region/self-hosted instance).
+  TCK_ENDPOINT: https://cloud.appwrite.io/v1
+  # The shared project — exists already; re-runs are idempotent.
+  TCK_PROJECT: tck
+  # The project API key for the oracle (`client --key` — Appwrite Cloud has
+  # no CLI email/password login). Create it once in the console with all
+  # scopes, then set here (Settings → Secrets → Actions).
+  TCK_KEY: ${{ secrets.APPWRITE_TCK_KEY }}
+
+jobs:
+  certify:
+    runs-on: ubuntu-latest
+    # Fork PRs have no access to repository secrets — certification needs the
+    # cloud account, so skip them. Also skip until the secrets are configured
+    # (avoids a confusing auth failure on a fresh repo).
+    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork) && secrets.APPWRITE_TCK_KEY != '' }}
+    steps:
+      # 1. Checkout the bridge (templates + tck/ oracle) under test.
+      - name: Checkout Bridge
+        uses: actions/checkout@v4
+
+      # 2. Checkout the DomainCraft core (kitchen-sink.yaml) and install the
+      #    CLI from the matching release in one go.
+      - name: Checkout Core
+        uses: actions/checkout@v4
+        with:
+          repository: DomainCraft/DomainCraft
+          path: core
+          ref: ${{ env.CORE_VERSION }}
+
+      # 3. Set up Go (ubuntu-latest does not ship it; core requires 1.25+).
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install DomainCraft CLI
+        run: |
+          go install github.com/DomainCraft/DomainCraft/cmd/domaincraft@${{ env.CORE_VERSION == 'main' && 'latest' || env.CORE_VERSION }}
+
+      # 4. Install the Appwrite CLI (v26+ — the migration engine for the push).
+      - name: Install Appwrite CLI
+        run: npm install -g appwrite-cli
+
+      # 5. Generate from the kitchen-sink domain using the current bridge.
+      - name: Generate Config
+        run: |
+          domaincraft generate \
+            --domain ./core/compliance-suite/kitchen-sink.yaml \
+            --bridge "$GITHUB_WORKSPACE" \
+            --output ./tck-out \
+            --non-interactive
+
+      # 6. Run the oracle against Appwrite Cloud: client with API key → clean
+      #    stale role teams → push all → assert state → idempotency → seed.
+      #    This is the certification (hand-written, independent).
+      - name: Run Certification Oracle
+        run: |
+          node tck/verify.js \
+            --out ./tck-out \
+            --project "$TCK_PROJECT" \
+            --key "$TCK_KEY" \
+            --endpoint "$TCK_ENDPOINT"
+
+      # 6b. Gaps model (appwrite-only contracts the kitchen-sink lacks): the
+      #     entity-rename $id-pin (old id + new name), relatedTable pin, bigint
+      #     gte/lte bounds, no-permissions-block → any, empty lists → deny,
+      #     seed on an @Owner entity. Same project, exact counts. The oracle
+      #     first pushes the PRE-rename config (tck/appwrite-gaps-pre.yaml,
+      #     entity still Gadget) and seeds its row, then pushes the renamed
+      #     config — the row surviving the rename is the "строки на месте" proof.
+      - name: Run Gaps Certification
+        run: |
+          domaincraft generate \
+            --domain ./tck/appwrite-gaps-pre.yaml \
+            --bridge "$GITHUB_WORKSPACE" \
+            --output ./tck-gaps-pre-out \
+            --non-interactive
+          domaincraft generate \
+            --domain ./tck/appwrite-gaps.yaml \
+            --bridge "$GITHUB_WORKSPACE" \
+            --output ./tck-gaps-out \
+            --non-interactive
+          node tck/verify.js \
+            --gaps \
+            --out ./tck-gaps-out \
+            --gaps-pre ./tck-gaps-pre-out \
+            --project "$TCK_PROJECT" \
+            --key "$TCK_KEY" \
+            --endpoint "$TCK_ENDPOINT"
