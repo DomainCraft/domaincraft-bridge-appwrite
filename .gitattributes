@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The TCK oracle (tck/verify.js) is verification-only 
+*.js linguist-vendored
