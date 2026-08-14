@@ -11,7 +11,7 @@
 // push is a flat create/update-only resource — no deleteRemovedTeams in CLI,
 // no upstream issue asking for one), so the oracle cleans role teams itself
 // before each run (cleanupRoleTeams) to keep exact team counts assertable.
-//   default — kitchen-sink (13 tables, @Owner/rowSecurity, relationships,
+//   default — kitchen-sink (14 tables, @Owner/rowSecurity, relationships,
 //             teams, settings, seed)
 //   --gaps  — tck/appwrite-gaps.yaml (appwrite-only contracts): the entity-
 //             rename $id-pin (old id + new name, plan §3.2), the relatedTable
@@ -116,8 +116,11 @@ function section(name) { console.log(`\n── ${name} ──`); }
 
 // Per-mode expectations (mapping contract, plan §5–§6 + §3.2 for the pin)
 const KITCHEN_SINK = {
-  tables: ["Categories", "Roles", "Tags", "EventLogs", "Folders", "Documents",
+  tables: ["Categories", "Counters", "Roles", "Tags", "EventLogs", "Folders", "Documents",
     "Orders", "Payments", "Products", "OrderItems", "ProductTags", "Reviews", "UserProfiles"],
+  // Tables whose primary key is NOT a uuid (row $id): the PK is a real column
+  // (Counter.id int [primary] → integer column + unique index, plan §4).
+  nonUuidPk: ["Counters"],
   ownerTables: ["Orders", "OrderItems", "Reviews", "Documents", "Folders", "UserProfiles"],
   expectRelationship: {
     Products: ["categoryId"],
@@ -357,8 +360,15 @@ async function main() {
   for (const t of tables) {
     const cols = (full[t.$id].columns || []).filter((c) => !c.key.startsWith("$"));
     const keys = cols.map((c) => c.key);
-    // No uuid-PK column: every entity has a uuid PK → row $id
-    check(`${t.name}: no uuid-PK column`, !keys.includes("id"), keys.join(","));
+    // uuid PK → row $id (no column); non-uuid PK (spec.nonUuidPk) → real
+    // column, required, covered by a unique index (plan §4)
+    if ((spec.nonUuidPk || []).includes(t.name)) {
+      const id = cols.find((c) => c.key === "id");
+      check(`${t.name}: non-uuid PK column id required`, !!id && id.required === true,
+        JSON.stringify(id || {}).slice(0, 100));
+    } else {
+      check(`${t.name}: no uuid-PK column`, !keys.includes("id"), keys.join(","));
+    }
     // Non-auth relations are real Appwrite relationships
     for (const k of spec.expectRelationship[t.name] || []) {
       const c = cols.find((x) => x.key === k);
@@ -403,7 +413,8 @@ async function main() {
   for (const t of tables) {
     const idxRes = runJson(["tablesdb", "list-indexes", "-R", "--database-id", "main", "--table-id", t.$id]);
     const idx = idxRes.indexes || [];
-    const forbidden = ["id", ...(spec.expectRelationship[t.name] || [])];
+    const forbidden = [...(spec.nonUuidPk || []).includes(t.name) ? [] : ["id"],
+      ...(spec.expectRelationship[t.name] || [])];
     for (const i of idx) {
       const cols = i.columns || [];
       const bad = cols.filter((c) => forbidden.includes(c));
