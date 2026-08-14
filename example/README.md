@@ -65,26 +65,54 @@ relationship → push → restore it.
 Server: use `appwrite/appwrite:1.9.5` (1.9.6/`latest` were broken at the time of
 writing — `exec format error`).
 
-## Limitations
+## DomainCraft → Appwrite mapping
 
 The bridge implements only what `appwrite.config.json` can express; everything else
 becomes app-side logic or no-op fields.
 
-| DomainCraft construct | In Appwrite |
+**Field types**
+
+| DomainCraft | Appwrite |
 |---|---|
-| `decimal` | `float`/`double` (floating point — precision loss; store money as integer cents in `int`) |
+| `string` | `varchar` (size from `max`, default 255) |
+| `text` | `text` |
+| `int` / `bigint` | `integer` / `bigint` |
+| `float` / `decimal` | `double` — precision loss; store money as integer cents in `int` |
+| `boolean` | `boolean` |
+| `date` / `datetime` | `datetime` ISO 8601 (dates normalize to `T00:00:00Z`) |
+| `uuid` (primary key) | row `$id` — no column |
+| `uuid` (other) | `varchar(36)` |
 | `json` / `jsonb` | `text` (JSON string) |
-| `date` | `datetime` ISO 8601 (a time appears) |
+| `array(T)` | `array: true` |
+| `email` / `url` / `ipv4` | `string` + `format: email / url / ip` |
+| `enum(E)` | `string` + `format: enum` + `elements` |
+
+**Relations**
+
+| DomainCraft | Appwrite |
+|---|---|
+| `relation(T)` | `relationship` — relatedTable, relationType, twoWay, onDelete |
+| relation to the auth entity | `varchar(36)` user ID — users live in Appwrite Auth |
 | self-relation | `varchar(36)` parent ID, no FK (Appwrite issue #9471) |
-| `default` on a required field | `required:false` + default (Appwrite forbids default on required) — column becomes nullable |
-| audit / soft_delete / optimistic_lock | columns only, `required:false` — the server doesn't auto-fill; the app writes them |
-| indexes on relationship columns | dropped from the index (TablesDB refuses); empty index omitted |
+| index on a relationship column | dropped — TablesDB refuses |
+
+**Modifiers, renames & features**
+
+| DomainCraft | Appwrite |
+|---|---|
+| `required` | `required: true` |
+| `unique` | `unique` index |
+| `indexes` | `key` / `unique` index |
+| `gte` / `gt` / `lte` / `lt` | inclusive `min` / `max` |
+| `default` on a required field | `required:false` + default — column becomes nullable |
 | `default: now()` / `uuid()` | static defaults only |
+| field `old_name` | `previousKey` — in-place rename, data preserved |
+| entity `old_name` | `$id` pinned — `name` updated in place, rows preserved |
+| audit / soft_delete / optimistic_lock | nullable columns — server doesn't auto-fill; the app writes them |
 | `regex` / `hidden` / `readonly` | validation / semantics in the app |
-| `gt` / `lt` (strict) | approximated by inclusive `min` / `max` |
 | `on_delete: no_action` | `restrict` |
-| roles with same lowercase slug | unsupported (`role-<lowercase>` — one team) |
 | index type (btree / gin / …) | `key` (key / unique / fulltext only) |
+| roles with same lowercase slug | unsupported (`role-<lowercase>` — one team) |
 | `event_sourced` / `cacheable` / `multi_tenancy` / `infrastructure` | ignored |
 
 ## Verify
