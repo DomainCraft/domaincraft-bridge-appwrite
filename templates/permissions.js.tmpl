@@ -16,7 +16,7 @@ const ROW_PERMISSIONS = {
 {{- if ne $entity.Name $auth }}
 {{- $rowSec := false }}
 {{- if $entity.Permissions }}
-{{- $rowSec = or (hasOwnershipToken $entity.Permissions.Read) (hasOwnershipToken $entity.Permissions.Create) (hasOwnershipToken $entity.Permissions.Update) (hasOwnershipToken $entity.Permissions.Delete) }}
+{{- $rowSec = $entity.Permissions.HasOwnerToken }}
 {{- end }}
 {{- if $rowSec }}
 {{- /* table id = $id-pin for a renamed entity (mirror of define "entityID" in appwrite.config.json.tmpl — keep in sync) */ -}}

@@ -13,12 +13,6 @@ migrations:
   commands:
     - "appwrite push all --force"
 
-# Informational — the core does not validate against this list.
-supports:
-  - api_style: rest
-  - database: appwrite
-  - auth: jwt
-
 templates:
   # ===== SCHEMA (the only artifact the bridge owns) =====
   - for: project

@@ -41,6 +41,7 @@ entities:
       delete: [Admin]
     seed:
       - { id: "550e8400-e29b-41d4-a716-446655440111", sku: "GAP-1", stock: 42 }
+      - { id: "550e8400-e29b-41d4-a716-446655440222", sku: "GAP-2", stock: 7 }
   Bundle:
     fields:
       id: uuid [primary]

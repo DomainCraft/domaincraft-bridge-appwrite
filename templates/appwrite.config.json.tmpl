@@ -38,7 +38,7 @@
 {{- $firstP := true }}
 {{- $rowSec := false }}
 {{- if $entity.Permissions }}
-{{- $rowSec = or (hasOwnershipToken $entity.Permissions.Read) (hasOwnershipToken $entity.Permissions.Create) (hasOwnershipToken $entity.Permissions.Update) (hasOwnershipToken $entity.Permissions.Delete) }}
+{{- $rowSec = $entity.Permissions.HasOwnerToken }}
 {{- end }}
 {{- /* auth off or no permissions block → all four operations public (mirrors [AllowAnonymous]) */ -}}
 {{- if or (not $.Project.HasAuth) (eq $entity.Permissions nil) }}
@@ -64,7 +64,7 @@
       "columns": [
 {{- $firstCol := true }}
 {{- range $f := $entity.Fields }}
-{{- $isUuidPk := and $f.IsPrimary (eq $f.DatabaseType "uuid") }}
+{{- $isUuidPk := and $f.IsPrimary $f.IsUuid }}
 {{- $relAuth := false }}
 {{- if and $.Project.HasAuth (eq $f.RelationTarget $.Project.Auth.Entity) }}{{ $relAuth = true }}{{ end }}
 {{- $relSelf := eq $f.RelationTarget $entity.Name }}
@@ -73,10 +73,10 @@
 {{- if and (not $isUuidPk) (or (not $f.IsRelation) $varcharRel) }}
 {{- if not $firstCol }},{{ end }}{{ $firstCol = false }}
 {{- /* CLI 26 config contract: enum/email/url/ip are NOT column types — they are "string" + a format field (internal/schema/attributes.go). float/decimal write as "double". */ -}}
-{{- $inner := enumTypeName $f.DatabaseType }}
+{{- $inner := $f.EnumTypeName }}
 {{- $typeName := "varchar" }}
 {{- $format := "" }}
-{{- if isEnumType $f.DatabaseType }}{{ $typeName = "string" }}{{ $format = "enum" }}{{ else if eq $inner "email" }}{{ $typeName = "string" }}{{ $format = "email" }}{{ else if eq $inner "url" }}{{ $typeName = "string" }}{{ $format = "url" }}{{ else if eq $inner "ipv4" }}{{ $typeName = "string" }}{{ $format = "ip" }}{{ else }}{{ $typeName = languageType $inner false }}{{ end }}
+{{- if $f.IsEnum }}{{ $typeName = "string" }}{{ $format = "enum" }}{{ else if $f.HasValidation "email" }}{{ $typeName = "string" }}{{ $format = "email" }}{{ else if $f.HasValidation "url" }}{{ $typeName = "string" }}{{ $format = "url" }}{{ else if $f.HasValidation "ipv4" }}{{ $typeName = "string" }}{{ $format = "ip" }}{{ else }}{{ $typeName = languageType $inner false }}{{ end }}
         {
           "key": "{{ camelcase $f.Name }}",
           "type": "{{ $typeName }}",
@@ -86,17 +86,12 @@
 {{- /* feature-injected fields (audit/soft-delete/optimistic-lock) are nullable — Appwrite has no server-side auto-fill, the app writes them */ -}}
 {{- $hasDefault := and $f.DefaultValue (not $f.DefaultIsFunc) (not $f.IsArray) }}
 {{- $required := not $f.IsNullable }}
-{{- if isFeatureField $f.Name }}{{ $required = false }}{{ end }}
+{{- if $f.IsFeatureField }}{{ $required = false }}{{ end }}
 {{- /* Appwrite forbids a default on a required column — required+default becomes nullable with the default kept (the DB still fills it; documented loss) */ -}}
 {{- if and $required $hasDefault }}{{ $required = false }}{{ end }}
           "required": {{ jsonValue $required }}
-{{- $size := "" }}
-{{- if eq $inner "string" }}
-{{- range $f.Validations }}{{ if eq .Name "max" }}{{ $size = .Value }}{{ end }}{{ end }}
-{{- if not $size }}{{ $size = "255" }}{{ end }}
-{{- else if eq $inner "uuid" }}
-{{- $size = "36" }}
-{{- end }}
+{{- $size := columnSize $inner }}
+{{- if $size }}{{- range $f.Validations }}{{ if eq .Name "max" }}{{ $size = .Value }}{{ end }}{{ end }}{{ end }}
 {{- if $size }},
           "size": {{ $size }}
 {{- end }}
@@ -106,15 +101,14 @@
 {{- /* Appwrite forbids a default on a required column, so a real default only lands on optional non-array fields; the key itself is ALWAYS emitted (null fallback) because the CLI's attribute-update sends `required` + `default` together and the server rejects a PATCH without `default`. */ -}}
 {{- $def := "" }}
 {{- if and $hasDefault (not $required) }}{{ $def = $f.DefaultValue }}{{ end }}
-{{- if and $def (eq $f.DatabaseType "date") (not (contains "T" $def)) }}{{ $def = printf "%sT00:00:00Z" $def }}{{ end }}
+{{- if and $def $f.IsDate (not (contains "T" $def)) }}{{ $def = printf "%sT00:00:00Z" $def }}{{ end }}
 {{- /* numeric/boolean defaults come from the IR as strings — emit them raw, the API validates the type */ -}}
-{{- $defInner := enumTypeName $f.DatabaseType }}
-{{- $defRaw := or (eq $defInner "int") (eq $defInner "bigint") (eq $defInner "float") (eq $defInner "decimal") (eq $defInner "boolean") }},
+{{- $defRaw := or $f.IsNumeric $f.IsBoolean }},
           "default": {{ if and $def $defRaw }}{{ $def }}{{ else if $def }}{{ jsonValue $def }}{{ else }}null{{ end }}
 {{- $min := "" }}
 {{- $max := "" }}
-{{- /* $inner is the IR type (int/bigint/float/decimal) — gte/gt/lte/lt only apply to numeric fields */ -}}
-{{- $isNum := or (eq $inner "int") (eq $inner "bigint") (eq $inner "float") (eq $inner "decimal") }}
+{{- /* gte/gt/lte/lt only apply to numeric scalar fields */ -}}
+{{- $isNum := $f.IsNumeric }}
 {{- if $isNum }}
 {{- range $f.Validations }}
 {{- if eq .Name "gte" }}{{ $min = .Value }}{{ end }}
@@ -129,7 +123,7 @@
 {{- if $max }},
           "max": {{ $max }}
 {{- end }}
-{{- if isEnumType $f.DatabaseType }}
+{{- if $f.IsEnum }}
 {{- $vals := index $.Project.Enums $inner }},
           "elements": [
 {{- range $vi, $v := $vals }}{{ if gt $vi 0 }},{{ end }}{{ jsonValue $v }}{{ end }}
@@ -170,11 +164,11 @@
 {{- /* TablesDB refuses indexes on relationship columns — drop them from the index; skip the index entirely if it becomes empty (auth/self relations are varchar columns and stay indexable). */ -}}
 {{- $cols := list }}
 {{- range $c := $idx.Fields }}
-{{- $f := lookupField $c $entity }}
+{{- $f := $entity.FieldByName $c }}
 {{- if $f }}
 {{- $relAuth := and $.Project.HasAuth (eq $f.RelationTarget $.Project.Auth.Entity) }}
 {{- $relSelf := eq $f.RelationTarget $entity.Name }}
-{{- $isUuidPk := and $f.IsPrimary (eq $f.DatabaseType "uuid") }}
+{{- $isUuidPk := and $f.IsPrimary $f.IsUuid }}
 {{- /* relationship columns and the uuid PK (row $id, no column) are not indexable */ -}}
 {{- if not (or (and $f.IsRelation (not $relAuth) (not $relSelf)) $isUuidPk) }}
 {{- $cols = append $cols $c }}
@@ -199,7 +193,7 @@
 {{- end }}
 {{- /* field-level unique (incl. non-uuid PK) — skipped when a declared unique index already covers the single column */ -}}
 {{- range $f := $entity.Fields }}
-{{- $isUuidPk := and $f.IsPrimary (eq $f.DatabaseType "uuid") }}
+{{- $isUuidPk := and $f.IsPrimary $f.IsUuid }}
 {{- $covered := false }}
 {{- range $entity.Indexes }}{{ if and .Unique (eq (len .Fields) 1) (eq (index .Fields 0) $f.Name) }}{{ $covered = true }}{{ end }}{{ end }}
 {{- $relAuth := and $.Project.HasAuth (eq $f.RelationTarget $.Project.Auth.Entity) }}

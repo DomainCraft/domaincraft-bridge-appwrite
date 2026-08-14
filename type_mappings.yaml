@@ -1,5 +1,5 @@
 # IR database type → Appwrite TablesDB column type.
-# Loaded at runtime by the renderer: `languageType (enumTypeName .DatabaseType) false`
+# Loaded at runtime by the renderer: `languageType .EnumTypeName false`
 # resolves the column "type" for scalar fields; enums are handled by the template
 # ("enum" + elements), relationships by the template ("relationship" + relatedTable).
 #
@@ -37,3 +37,10 @@ behaviors:
   set_null: "setNull"
   restrict: "restrict"
   no_action: "restrict"
+
+# Default column size per IR type (the template overrides string with a `max`
+# validation). Sizes are bridge-specific (Appwrite varchar(uuid)=36, string=255),
+# so they live here rather than in the template or the core.
+column_sizes:
+  string: "255"
+  uuid: "36"

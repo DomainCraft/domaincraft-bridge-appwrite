@@ -41,22 +41,26 @@ try {
 
 const OWNER_UID = process.env.SEED_USER_ID || process.argv[2] || "";
 
+// Seed rows come from the CORE's normalized SeedData (already coerced to native
+// JS types), so this script only serializes them — it does not re-look-up field
+// types or re-coerce numbers/booleans.
 const ROWS = {
 {{- range $entity := $.Project.Entities }}
-{{- if $entity.Seed }}
+{{- $se := $.SeedData.Entity $entity.Name }}
+{{- if and $se (gt (len $se.Records) 0) }}
 {{- /* table id = $id-pin for a renamed entity (mirror of define "entityID" in appwrite.config.json.tmpl — keep in sync) */ -}}
 {{- $tableKey := kebabcase $entity.NamePlural }}
 {{- if $entity.OldName }}{{ $tableKey = kebabcase (pluralize $entity.OldName) }}{{ end }}
   "{{ $tableKey }}": [
-{{- range $ri, $row := $entity.Seed }}
-{{- $pk := "" }}
+{{- range $ri, $row := $se.Records }}
+{{- $pk := $entity.PrimaryKey }}
 {{- $pkUuid := false }}
-{{- range $entity.Fields }}{{ if .IsPrimary }}{{ $pk = .Name }}{{ if eq .DatabaseType "uuid" }}{{ $pkUuid = true }}{{ end }}{{ end }}{{ end }}
+{{- if $pk }}{{ if $pk.IsUuid }}{{ $pkUuid = true }}{{ end }}{{ end }}
 {{- $rowId := "" }}
-{{- if and $pk $pkUuid }}{{ $rowId = index $row $pk }}{{ end }}
+{{- if $pkUuid }}{{ range $row.Fields }}{{ if and (eq .Field $pk.Name) (eq (kindOf .Value) "string") }}{{ $rowId = .Value }}{{ end }}{{ end }}{{ end }}
 {{- $rowSec := false }}
 {{- if $entity.Permissions }}
-{{- $rowSec = or (hasOwnershipToken $entity.Permissions.Read) (hasOwnershipToken $entity.Permissions.Create) (hasOwnershipToken $entity.Permissions.Update) (hasOwnershipToken $entity.Permissions.Delete) }}
+{{- $rowSec = $entity.Permissions.HasOwnerToken }}
 {{- end }}
     {
 {{- if $rowId }}
@@ -64,21 +68,17 @@ const ROWS = {
 {{- end }}
       "permissions": {{ if $rowSec }}OWNER_UID ? rowPermissions("{{ $tableKey }}", OWNER_UID) : []{{ else }}[]{{ end }},
       "data": {
-{{- range $k := sortAlpha (keys $row) }}
+{{- range $row.Fields }}
 {{- /* uuid PK → rowId; non-uuid PK is an ordinary required column → keep it in data */ -}}
-{{- if not (and (eq $k $pk) $pkUuid) }}
-{{- $f := lookupField $k $entity }}{{ if $f }}
+{{- if not (and $pkUuid (eq .Field $pk.Name)) }}
+{{- $v := .Value }}
 {{- /* date seeds normalize to full ISO so the datetime column accepts them */ -}}
-{{- $v := index $row $k }}
-{{- if and (eq $f.DatabaseType "date") (not (contains "T" $v)) }}{{ $v = printf "%sT00:00:00Z" $v }}{{ end }}
-        "{{ $k }}": {{ rawSeedValue $v $f.DatabaseType }},
-{{- else }}
-        "{{ $k }}": {{ jsonValue (index $row $k) }},
-{{- end }}
+{{- if eq .DBType "date" }}{{ if not (contains "T" $v) }}{{ $v = printf "%sT00:00:00Z" $v }}{{ end }}{{ end }}
+        "{{ .Field }}": {{ jsonValue $v }},
 {{- end }}
 {{- end }}
       }
-    }
+    }{{ if ne (add $ri 1) (len $se.Records) }},{{ end }}
 {{- end }}
   ],
 {{- end }}

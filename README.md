@@ -1,164 +1,178 @@
 # domaincraft-bridge-appwrite
 
-Мост DomainCraft для [Appwrite](https://appwrite.io) (TablesDB + teams + settings).
+Turn your `domain.yaml` into a complete Appwrite backend schema.
 
-Принцип: **мост владеет только схемой**. Из доменной модели генерируется один
-`appwrite.config.json` (таблицы, колонки, индексы, пермишены, команды ролей,
-настройки проекта) — всё это применяется самим CLI Appwrite v26, который является
-полноценным движком миграций (diff-план, `previousKey`-ренеймы, удаления с
-подтверждением). Миграционные скрипты мост не пишет.
+Appwrite already gives you everything else: schema-as-code (`appwrite.config.json`),
+the Appwrite CLI v26 as a migration engine (`appwrite push`), built-in auth, teams,
+row-level security, and SDKs. The one stage you still do by hand is **translating
+your domain model into that schema** — clicking through the Console or hand-writing
+the config. This bridge closes that stage.
 
-Выход:
+> Appwrite already automates some of this, but only **one table at a time**: AI
+> suggestions generate a single table's columns and indexes from its name, and
+> Full Schema Creation provisions one table per request. Neither models
+> **relations, permissions, roles, and seed across the whole project** as one
+> versionable, declarative model — that's the layer this bridge adds.
 
-```
-appwrite.config.json     # вся схема одним файлом
-helpers/permissions.js   # row-пермишены для @Owner (только если есть @Owner)
-scripts/seed.js          # seed-строки через CLI create-row (только если есть seed)
-README.md                # usage + runtime + ограничения
-```
+**domain as schema → schema as code → Appwrite.** You model the domain once,
+declaratively; the bridge compiles it to `appwrite.config.json` and the CLI deploys it.
 
-## Использование (процесс)
+## What it is
 
-Мост — это шаг «доменная модель → схема Appwrite». Весь процесс:
+- **Input** — `domain.yaml`: entities, fields, relations, permissions, roles, seed data.
+- **Output** — a single `appwrite.config.json` describing the whole backend
+  (database, tables, columns, relationships, indexes, permissions, role teams,
+  project settings), plus a few runtime helpers.
+
+| File | Purpose |
+|---|---|
+| `appwrite.config.json` | The entire schema — tables, columns, relationships, indexes, permissions, roles, settings |
+| `helpers/permissions.js` | Row-level permissions for `@Owner` (generated only when used) |
+| `scripts/seed.js` | Idempotent seed from the model's `seed:` block (when present) |
+| `README.md` | Deployment guide + this project's limitation matrix |
+
+**What it does NOT do:** generate server code or migration scripts. Your app
+(client, function, or server) talks to Appwrite directly through the SDK. The
+bridge prepares the schema and permissions; the **Appwrite CLI v26 is the
+migration engine** — it diffs the config against your live project and brings it
+into line.
+
+## Why
+
+- **No Console click-work.** Model once in YAML, generate the whole schema.
+- **One source of truth.** Schema, permissions, and roles all derive from `domain.yaml`.
+- **No hand-written migrations.** Change the model → regenerate → `appwrite push`
+  computes and applies the diff.
+- **Permissions can't drift.** `permissions` compile to table `$permissions`, roles
+  to teams (`role-admin`, `role-user`), `@Owner` to row-level security.
+
+## Quick start
 
 ```bash
-# 1. Сгенерировать схему из доменной модели (один файл appwrite.config.json)
+# 1. Bind to your project (once)
+appwrite client --endpoint https://cloud.appwrite.io/v1 --project-id <PROJECT_ID> --key <API_KEY>
+
+# 2. Generate the schema
 domaincraft generate --domain domain.yaml --bridge domaincraft-bridge-appwrite --output .
 
-# 2. Один раз: связать CLI с вашим проектом Appwrite
-#    (создайте проект в консоли Appwrite Cloud или поднимите self-hosted)
-appwrite init project        # интерактивно выберет/создаст проект
-# или неинтерактивно:
-appwrite client --endpoint https://cloud.appwrite.io/v1 --project-id <id> --key <api-key> --force
-
-# 3. Применить схему: создаёт/обновляет таблицы, колонки, индексы,
-#    команды ролей и настройки; повторный запуск — no-op (идемпотентно)
-appwrite push all
-# в CI/скриптах — без промптов:
+# 3. Deploy (re-running is a no-op)
 appwrite push all --force
 
-# 4. (если в модели есть seed) Залить стартовые данные
+# 4. Seed (only when the model has seed)
 node scripts/seed.js
 ```
 
-Всё это можно сделать одной командой после генерации:
+`--migrate` chains 2 + 3: `domaincraft generate … --migrate` — bind first (step 1),
+or the push has no project to target.
 
-```bash
-domaincraft generate --domain domain.yaml --bridge domaincraft-bridge-appwrite --output . --migrate
+> `appwrite client` lives in the CLI session and never touches the config file, so
+> generating is always safe. Don't run `appwrite init project` — it clobbers the
+> schema. No API key? `appwrite login`, then set `projectId`/`endpoint` in the file.
+
+> ⚠️ `push` treats the config as the **full** project state — databases/tables not
+> present in the config will be proposed for deletion. Don't push into a project
+> with data outside your domain model.
+
+## How it works
+
+```
+domain.yaml ──(domaincraft generate)──▶ appwrite.config.json ──(appwrite push)──▶ Appwrite
 ```
 
-**Что происходит дальше (рантайм):** мост не генерирует серверный код — ваше
-приложение работает с Appwrite напрямую через SDK. Из схемы в приложении
-используются:
+1. `domain.yaml` — the domain model (the same DSL used by every DomainCraft bridge).
+2. `appwrite.config.json` — a declarative description of the *desired* Appwrite
+   project state.
+3. `appwrite push all` — the Appwrite CLI diffs desired vs. actual and applies the
+   plan. The bridge emits no migration scripts.
 
-- **Авторизация** — нативная Appwrite (email-password). При регистрации
-  пользователя назначьте роль: `teams.createMembership("role-<роль>", [], email)`
-  (команды ролей созданы push'ем из `auth.roles`).
-- **@Owner-сущности** — при создании строки передайте row-пермишены из
-  `helpers/permissions.js`: `rowPermissions(entity, uid)` → `createRow(...,
-  permissions)`. Appwrite сам фильтрует `list` по `user:{uid}` — читать свои
-  строки можно без фильтров.
-- **Миграции** — при изменении `domain.yaml` просто перегенерируйте и
-  запустите `push all` снова: CLI сам построит diff (добавление/удаление
-  колонок, `previousKey`-ренеймы с сохранением данных, `$id`-пин для
-  переименованных сущностей — см. раздел «Renames»).
+## Key concepts
 
-## Сертификация (TCK)
+- **Auth is native Appwrite.** The auth entity (e.g. `User`) is **not** created as
+  a table — users live in Appwrite Auth. Relations to it become `varchar(36)`
+  columns holding user IDs.
+- **Roles → teams.** Each role in `auth.roles` becomes a team `role-<role>`. After
+  registration, add the user to a team:
+  `teams.createMembership("role-user", [], email)`.
+- **`@Owner` → row security.** When creating a row, pass `rowPermissions("orders", userId)`
+  from `helpers/permissions.js` — Appwrite then filters `list` by row permissions
+  automatically.
+- **Seed.** `SEED_USER_ID=<userId> node scripts/seed.js` (idempotent) — `@Owner` row
+  permissions resolve to that user.
 
-Мост сертифицируется собственным workflow — **не** копией общего шаблона
-`DomainCraft/compliance-suite/certification.yml`. Тот шаблон рассчитан на мосты,
-генерирующие *запускаемое приложение* (`docker compose up` сгенерированного app +
-k6 против HTTP-контракта). Этот мост генерирует `appwrite.config.json`, который
-*пушится* в Appwrite — поэтому сертификация проверяет **состояние** после push
-(таблицы, rowSecurity, `$permissions`, колонки, индексы, teams, settings, seed),
-а не HTTP-поведение.
+## Renames & data safety
 
-### Что проверяется и как этому доверять
-
-Цепочка доверия строится на трёх вещах:
-
-1. **Мост владеет только схемой.** Из `domain.yaml` генерируется один
-   `appwrite.config.json` — никаких миграционных скриптов и рантайм-кода мост не
-   пишет (§1 плана). Всю «как»-часть (diff, применение, подтверждения) делает сам
-   CLI Appwrite v26, который является полноценным движком миграций.
-2. **Оракул рукописный и независимый.** `tck/verify.js` написан вручную против
-   контракта маппинга (§5–§6 плана) — он НЕ генерируется из шаблонов моста.
-   Будь он сгенерирован, баг шаблона воспроизвёлся бы в тесте, и всё «зеленело»
-   бы при нарушенном контракте. Это тот же принцип, что у TCK ядра
-   (compliance-suite): тест — независимый оракул, а не зеркало генератора.
-3. **Проверяется фактическое состояние сервера, а не вывод CLI.** Оракул пушит
-   конфиг в реальный Appwrite, затем читает сервер обратно (`get-table`,
-   `list-indexes`, `teams list`, `project get`) и сверяет с контрактом: имена
-   таблиц и rowSecurity, формы `$permissions`, типы колонок, отношения, индексы,
-   команды ролей, настройки auth, seed-строки. Дополнительно: повторный push
-   должен быть no-op (идемпотентность), а в gaps-режиме — rename round-trip
-   (строка, созданная до переименования сущности, переживает push).
-
-### Два режима в одном проекте
-
-Оракул гоняет две модели **в одном проекте** `tck`:
-
-| Режим | Модель | Что проверяет |
+| Change in `domain.yaml` | What `push` does | Data |
 |---|---|---|
-| **kitchen-sink** | `compliance-suite/kitchen-sink.yaml` (общая TCK-модель ядра) | основной маппинг: 13 таблиц, `@Owner`/rowSecurity, отношения, индексы, 5 команд ролей, settings, seed |
-| **gaps** | `tck/appwrite-gaps.yaml` (+ `_pre` для rename round-trip) | appwrite-специфичные контракты: `$id`-пин рейма, relatedTable-пин, bigint-границы, «нет permissions-блока → any», «пустые списки → deny», 2 команды ролей |
+| field `old_name` | renames the column in place (`previousKey`) | preserved |
+| entity `old_name` | keeps the table `$id`, updates its `name` | preserved |
+| `required` / `default` / `size` / `min` / `max` / `elements` / `onDelete` | updates the column in place | preserved |
+| `type` / `array` / `relatedTable` | recreates the column | **lost** (plan warns) |
 
-Оба режима ассертят **точные счётчики** (13/13 таблиц и ровно 5 команд; 4/4
-таблицы и ровно 2 команды) — это и есть детект «мост создал лишнее или потерял
-нужное». Один проект возможен потому, что CLI при `push all` чистит сервер сам,
-а чего не чистит — убирает оракул:
+**Entity rename** (`old_name`) pins the table `$id` to the old name, so `push`
+updates the display `name` in place and rows survive. `old_name` is a *permanent*
+`$id` pin: removing it changes the `$id` → delete+create → move rows manually
+before pushing.
 
-| Ресурс | Кто чистит лишнее |
-|---|---|
-| Таблицы | ✅ сам CLI — `deleteRemovedTables`: таблицы, которых нет в конфиге, удаляются (`--force` — без промпта) |
-| Команды (teams) | ✅ оракул — `cleanupRoleTeams()` перед прогоном удаляет role-* команды вне ожидаемого набора (`teams list` → `teams delete --force`) |
+⚠️ Appwrite ≤1.9.5: renaming a column on a table with relationship columns fails
+(index-rebuild bug). Workaround: recreate the table, or temporarily drop the
+relationship → push → restore it.
 
-Почему команды чистит оракул, а не CLI: teams-пуш это flat resource — только
-create/update записей из конфига; `deleteRemovedTeams` в CLI не существует, и в
-issue-треке Appwrite запроса на это нет (дизайн, не баг). В одном проекте без
-очистки kitchen-sink оставил бы 5 role-команд, gaps-ассерт «ровно 2» упал бы.
-Очистка в 10 строк дешевле второго проекта и второго ключа.
+Server: use `appwrite/appwrite:1.9.5` (1.9.6/`latest` were broken at the time of
+writing — `exec format error`).
 
-### Как это работает в CI
+## Limitations
 
-Инфраструктуры в репо нет — сертификация идёт против **Appwrite Cloud**. Проект
-`tck` создаётся один раз в консоли, заводится один API-ключ со всеми scope
-(Appwrite Cloud не имеет CLI email/password логина — это стандартный CI-путь
-через ключи). Ключ лежит в GitHub Secrets: `APPWRITE_TCK_KEY`. Fork-PR не имеют
-доступа к секретам — для них сертификация пропускается (main-пуши и PR из
-репозитория проходят). Workflow: generate → оракул (kitchen-sink) → generate
-gaps (pre + post) → оракул (gaps) — оба режима зелёные = контракт соблюдён.
+Rule: only what can be expressed in `appwrite.config.json` is implemented;
+everything else is app-side logic or no-op fields.
 
-Локально (после генерации в `./tck-out`), против любого инстанса — cloud или
-self-hosted — нужен API-ключ проекта (создаётся в консоли инстанса):
+| DomainCraft construct | In Appwrite | Severity |
+|---|---|---|
+| `decimal` | `float`/`double` (floating point — precision loss; store money as integer cents in `int`) | 🔴 |
+| `json` / `jsonb` | `text` (JSON string) | 🟠 |
+| `date` | `datetime` ISO 8601 (a time appears) | 🟠 |
+| self-relation | `varchar(36)` parent ID, no FK (Appwrite issue #9471) | 🟠 |
+| `default` on a required field | `required:false` + default (Appwrite forbids default on required) — column becomes nullable | 🟡 |
+| audit/soft_delete/optimistic_lock features | columns with `required:false` — server doesn't auto-fill; the app writes them | 🟡 |
+| indexes on relationship columns | dropped from the index (TablesDB refuses); empty index omitted | 🟡 |
+| `default: now()` / `uuid()` | static defaults only | 🟡 |
+| `regex` / `hidden` / `readonly` | validation/semantics in the app | 🟡 |
+| `gt` / `lt` (strict) | approximated by inclusive `min`/`max` | 🟡 |
+| `on_delete: no_action` | `restrict` | 🟡 |
+| roles with same lowercase slug | unsupported (`role-<lowercase>` — one team) | 🟡 |
+| index type (btree/gin/…) | `key` (key/unique/fulltext only) | 🟡 |
+| `event_sourced` / `cacheable` / `multi_tenancy` / `infrastructure` | ignored | ⚪ |
+
+## Certification
+
+The bridge is certified by its own workflow (not the shared compliance-suite
+template — that one targets bridges generating a runnable app; this one pushes a
+schema).
+
+`tck/verify.js` is an independent, hand-written oracle: it pushes the config to a
+live Appwrite project and checks the **actual server state** against the mapping
+contract (tables, rowSecurity, `$permissions`, columns, indexes, role teams,
+settings, seed, idempotency, rename round-trip). The oracle is not generated from
+the bridge templates, so a template bug can't "green" the test.
+
+Verified against Appwrite Cloud: **132/132** (kitchen-sink) and **38/38** (gaps) —
+CERTIFIED. Both modes run in one `tck` project with one key (the oracle cleans up
+stray role teams itself). CI: `.github/workflows/certification.yml` (requires an
+API key in the `APPWRITE_TCK_KEY` secret).
 
 ```bash
 node tck/verify.js --out ./tck-out --project tck --key 'standard_...' \
   --endpoint https://cloud.appwrite.io/v1
+# gaps mode: add --gaps --out ./tck-gaps-out --gaps-pre ./tck-gaps-pre-out
 ```
 
-Оракул делает всё сам: `client --endpoint --project-id --key`, очистка stale
-role-команд, патч projectId/endpoint в сгенерированном `appwrite.config.json`,
-`push all --force`, ассерты состояния по контракту маппинга (план §5–§6),
-повторный push (идемпотентность), `seed.js` (идемпотентен — уже существующие
-rowId пропускаются). Повторный запуск на том же проекте тоже зелёный. Оба
-режима используют один проект и один ключ (`--gaps` — просто другой `--out`).
-Облачные сетевые глюки (TLS timeout и т.п.) не роняют прогон: прогон идемпотентен,
-поэтому оракул автоматически перезапускает себя (внутри push — до 3 попыток,
-снаружи — ещё до 2 полных перезапусков) и продолжает с чистого состояния.
+Design and support map: `appwrite-bridge-plan.md` (DomainCraft repo root).
 
-**Почему оракул живёт в репо моста:** проверки Appwrite-специфичны (обход бага
-rename-with-indexes, аддитивность settings) и не нужны ядру. Общее с ядром только
-`kitchen-sink.yaml` (доменная модель) — CI качает core ради неё и CLI.
+## Example
 
-## Состояние
+A complete Demo Shop output lives in [`example/`](example/): the source
+`domain.yaml` plus the generated config, helpers, seed, and README.
 
-- **Фаза 1:** bridge.yaml, type_mappings.yaml, 4 шаблона.
-- **Фаза 2:** регистрация `appwrite` в ядре (registry + specmeta).
-- **Фаза 3:** round-trip против Appwrite (чек-лист в `appwrite-bridge-plan.md` §8).
-- **Фаза 4:** README поддержки/отказов + сертификация (workflow + `tck/`).
-  Оракул прогнан: **132/132 checks, CERTIFIED** (kitchen-sink) и **38/38** (gaps с
-  rename round-trip) против Appwrite Cloud (один проект `tck`, один ключ;
-  переключение режимов проверено: ks → gaps → ks — все зелёные).
-
-Дизайн-документ: `appwrite-bridge-plan.md` (корень репозитория DomainCraft).
+```bash
+domaincraft generate --domain example/domain.yaml \
+  --bridge domaincraft-bridge-appwrite --output example --non-interactive
+```
