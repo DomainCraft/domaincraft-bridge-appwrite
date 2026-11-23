@@ -1,5 +1,12 @@
 # domaincraft-bridge-appwrite
 
+[![Moved to the monorepo](https://img.shields.io/badge/moved%20to-Fellmonkey%2FDomainCraft-orange)](https://github.com/Fellmonkey/DomainCraft)
+> This bridge is now developed at Fellmonkey/DomainCraft under bridges/(family)/(layer).
+> 
+> This repository is frozen and kept only so existing owner/repo references keep working.
+> 
+> Use domaincraft generate --bridge (bridge-id) from the new release.
+
 Turn your `domain.yaml` into a complete Appwrite backend schema.
 
 Appwrite already gives you everything else: schema-as-code (`appwrite.config.json`),
